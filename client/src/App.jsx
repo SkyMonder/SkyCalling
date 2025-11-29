@@ -17,7 +17,7 @@ function App() {
   const [incoming, setIncoming] = useState(null);
   const [inCall, setInCall] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [videoOff, setVideoOff] = useState(false);
+  const [videoOff, setVideoOff] = useState(true); // камера выключена по умолчанию
 
   useEffect(() => {
     if (token) {
@@ -115,32 +115,22 @@ function App() {
     return pc;
   }
 
-  // Новая функция включения камеры вручную
-  async function enableCamera() {
+  // Только аудио по умолчанию
+  async function startLocalAudio() {
     if (!localStreamRef.current) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-        localStreamRef.current = stream;
-        const localVid = document.getElementById('localVideo');
-        if (localVid) localVid.srcObject = stream;
-
-        if (pcRef.current) {
-          stream.getTracks().forEach(track => pcRef.current.addTrack(track, stream));
-        }
-      } catch (e) {
-        console.error('Ошибка при включении камеры:', e);
-        alert('Не удалось включить камеру');
-      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      localStreamRef.current = stream;
+      const localVid = document.getElementById('localVideo');
+      if (localVid) localVid.srcObject = stream;
     }
   }
 
   async function callUser(targetId) {
+    await startLocalAudio();
     const pc = createPeerConnection();
     pcRef.current = pc;
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
-    }
+    localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -148,12 +138,11 @@ function App() {
   }
 
   async function acceptCall() {
+    await startLocalAudio();
     const pc = createPeerConnection();
     pcRef.current = pc;
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
-    }
+    localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
 
     await pc.setRemoteDescription(incoming.offer);
     const answer = await pc.createAnswer();
@@ -162,6 +151,18 @@ function App() {
 
     setIncoming(null);
     setInCall(true);
+  }
+
+  // Включение видео по запросу
+  async function enableVideo() {
+    if (!localStreamRef.current) return;
+    const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    videoStream.getVideoTracks().forEach(track => localStreamRef.current.addTrack(track));
+
+    const localVid = document.getElementById('localVideo');
+    if (localVid) localVid.srcObject = localStreamRef.current;
+
+    setVideoOff(false);
   }
 
   function rejectCall() {
@@ -180,26 +181,13 @@ function App() {
     const remoteVid = document.getElementById('remoteVideo');
     if (remoteVid) remoteVid.srcObject = null;
     setInCall(false);
-  }
-
-  function endCallRemote() {
-    if (incoming && socketRef.current) {
-      socketRef.current.emit('end-call', { toSocketId: incoming.fromSocketId });
-    }
-    endCallLocal();
+    setVideoOff(true);
   }
 
   function toggleMute() {
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach(t => t.enabled = !t.enabled);
       setMuted(prev => !prev);
-    }
-  }
-
-  function toggleVideo() {
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach(t => t.enabled = !t.enabled);
-      setVideoOff(prev => !prev);
     }
   }
 
@@ -254,9 +242,6 @@ function App() {
                 </li>
               ))}
             </ul>
-            <button className='btn' onClick={enableCamera}>
-              {localStreamRef.current ? 'Камера включена' : 'Включить камеру'}
-            </button>
           </div>
           <div className='right'>
             <div className='videoGrid'>
@@ -265,7 +250,7 @@ function App() {
             </div>
             <div className='controls'>
               <button className='btn' onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
-              <button className='btn' onClick={toggleVideo}>{videoOff ? 'Turn Video On' : 'Turn Video Off'}</button>
+              <button className='btn' onClick={enableVideo}>{videoOff ? 'Turn Video On' : 'Turn Video Off'}</button>
               <button className='btn' onClick={endCallLocal}>End Call</button>
             </div>
           </div>
