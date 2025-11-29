@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 
-const API = (import.meta.env.VITE_API_URL) || '/api';
-const SIGNALING = (import.meta.env.VITE_SIGNALING_URL) || window.location.origin.replace(/^http/, 'ws');
+const API = import.meta.env.VITE_API_URL || '/api';
+const SIGNALING = import.meta.env.VITE_SIGNALING_URL || window.location.origin.replace(/^http/, 'ws');
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
@@ -17,12 +17,12 @@ function App() {
   const [incoming, setIncoming] = useState(null);
   const [inCall, setInCall] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [videoOff, setVideoOff] = useState(true); // камера выключена по умолчанию
+  const [videoOff, setVideoOff] = useState(true); // видео выключено по умолчанию
 
   useEffect(() => {
     if (token) {
-      const s = io(import.meta.env.VITE_SIGNALING_URL || "http://localhost:4000", {
-        transports: ["websocket"]
+      const s = io(import.meta.env.VITE_SIGNALING_URL || 'http://localhost:4000', {
+        transports: ['websocket']
       });
       socketRef.current = s;
 
@@ -42,7 +42,6 @@ function App() {
         }
       });
       s.on('call-ended', () => endCallLocal());
-
       return () => s.disconnect();
     }
   }, [token]);
@@ -95,42 +94,42 @@ function App() {
 
   function createPeerConnection() {
     const pc = new RTCPeerConnection();
-
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        socketRef.current.emit('ice-candidate', {
-          toSocketId: incoming ? incoming.fromSocketId : null,
-          candidate: e.candidate
-        });
+        socketRef.current.emit('ice-candidate', { toSocketId: incoming ? incoming.fromSocketId : null, candidate: e.candidate });
       }
     };
-
     pc.ontrack = (e) => {
       const [stream] = e.streams;
       const remoteVid = document.getElementById('remoteVideo');
-      if (remoteVid) remoteVid.srcObject = stream;
-      remoteStreamRef.current = stream;
+      if (remoteVid) {
+        remoteVid.srcObject = stream;
+        remoteStreamRef.current = stream;
+      }
     };
-
     return pc;
   }
 
-  // Только аудио по умолчанию
-  async function startLocalAudio() {
-    if (!localStreamRef.current) {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      localStreamRef.current = stream;
-      const localVid = document.getElementById('localVideo');
-      if (localVid) localVid.srcObject = stream;
-    }
+  async function startLocalStream() {
+    // Получаем только аудио
+    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    localStreamRef.current = audioStream;
+
+    // Получаем видео-трек, но выключенный
+    const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    const videoTrack = videoStream.getVideoTracks()[0];
+    videoTrack.enabled = false; // выключен по умолчанию
+    audioStream.addTrack(videoTrack);
+
+    const localVid = document.getElementById('localVideo');
+    localVid.srcObject = audioStream;
   }
 
   async function callUser(targetId) {
-    await startLocalAudio();
+    await startLocalStream();
     const pc = createPeerConnection();
     pcRef.current = pc;
-
-    localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
+    localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -138,47 +137,18 @@ function App() {
   }
 
   async function acceptCall() {
-    await startLocalAudio();
+    await startLocalStream();
     const pc = createPeerConnection();
     pcRef.current = pc;
-
-    localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
+    localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
 
     await pc.setRemoteDescription(incoming.offer);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socketRef.current.emit('accept-call', { toSocketId: incoming.fromSocketId, answer: pc.localDescription });
-
     setIncoming(null);
     setInCall(true);
   }
-
-  // Включение видео по запросу
-  async function enableVideo() {
-  if (!localStreamRef.current || !pcRef.current) return;
-
-  const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
-  const videoTrack = videoStream.getVideoTracks()[0];
-
-  // добавляем трек в локальный поток
-  localStreamRef.current.addTrack(videoTrack);
-  const localVid = document.getElementById('localVideo');
-  if (localVid) localVid.srcObject = localStreamRef.current;
-
-  // добавляем трек в RTCPeerConnection
-  const sender = pcRef.current.addTrack(videoTrack, localStreamRef.current);
-
-  // создаём новый offer и отправляем его другому пользователю
-  const offer = await pcRef.current.createOffer();
-  await pcRef.current.setLocalDescription(offer);
-
-  socketRef.current.emit('renegotiate', {
-    toSocketId: incoming ? incoming.fromSocketId : null,
-    offer: pcRef.current.localDescription
-  });
-
-  setVideoOff(false);
-}
 
   function rejectCall() {
     if (incoming) socketRef.current.emit('reject-call', { toSocketId: incoming.fromSocketId });
@@ -186,7 +156,10 @@ function App() {
   }
 
   function endCallLocal() {
-    if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
@@ -203,6 +176,14 @@ function App() {
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach(t => t.enabled = !t.enabled);
       setMuted(prev => !prev);
+    }
+  }
+
+  function toggleVideo() {
+    if (localStreamRef.current) {
+      const videoTrack = localStreamRef.current.getVideoTracks()[0];
+      videoTrack.enabled = !videoTrack.enabled;
+      setVideoOff(!videoTrack.enabled);
     }
   }
 
@@ -250,12 +231,10 @@ function App() {
               <button className='btn' onClick={searchUsers}>Search</button>
             </div>
             <ul className='users'>
-              {results.map(r => (
-                <li key={r.id}>
-                  <span>{r.username}</span>
-                  <button className='btn small' onClick={() => callUser(r.id)}>Call</button>
-                </li>
-              ))}
+              {results.map(r => <li key={r.id}>
+                <span>{r.username}</span>
+                <button className='btn small' onClick={() => callUser(r.id)}>Call</button>
+              </li>)}
             </ul>
           </div>
           <div className='right'>
@@ -265,7 +244,7 @@ function App() {
             </div>
             <div className='controls'>
               <button className='btn' onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
-              <button className='btn' onClick={enableVideo}>{videoOff ? 'Turn Video On' : 'Turn Video Off'}</button>
+              <button className='btn' onClick={toggleVideo}>{videoOff ? 'Turn Video On' : 'Turn Video Off'}</button>
               <button className='btn' onClick={endCallLocal}>End Call</button>
             </div>
           </div>
