@@ -1,526 +1,428 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { io } from 'socket.io-client';
+import React, { useEffect, useRef, useState } from 'react'
+import { io } from 'socket.io-client'
 
-/*
-  Примечания по env:
-  - VITE_API_URL должен быть http(s) (например: https://skycalling.onrender.com or https://example.com/api)
-  - VITE_SIGNALING_URL должен быть ws(s) (например: wss://skycalling.onrender.com:10000) либо оставляем пустым и клиент
-    сам использует window.location -> ws/wss
-*/
+/**
+ * Конфигурация:
+ * В production задавай в .env:
+ * VITE_API_URL=https://skycalling.onrender.com/api
+ * VITE_SIGNALING_URL=https://skycalling.onrender.com
+ *
+ * По-умолчанию API будет: https://{origin}/api
+ * SIGNALING по-умолчанию: origin (тот же домен), socket.io path /socket.io
+ */
+const API_BASE = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.host}/api`
+const SIGNALING_URL = import.meta.env.VITE_SIGNALING_URL || window.location.origin
 
-// Нормализуем API (если кто-то случайно поставил ws:// -> заменим на http://)
-const rawApi = import.meta.env.VITE_API_URL;
-const API = rawApi
-  ? rawApi.replace(/^wss?:/, (m) => (m === 'ws:' ? 'http:' : 'https:'))
-  : '/api';
-
-// Нормализуем SIGNALING (если дали http(s) -> заменим на ws(s))
-const rawSignaling = import.meta.env.VITE_SIGNALING_URL;
-const SIGNALING = rawSignaling
-  ? rawSignaling.replace(/^https?:/, (m) => (m === 'http:' ? 'ws:' : 'wss:'))
-  : window.location.origin.replace(/^http/, 'ws');
+function safeJson(res) {
+  const ct = res.headers.get('content-type') || ''
+  if (!res.ok) {
+    // Попытка прочитать текст (полезно для отладки)
+    return res.text().then((t) => {
+      throw new Error(`HTTP ${res.status}: ${t}`)
+    })
+  }
+  if (ct.includes('application/json')) return res.json()
+  // если сервер прислал HTML (например index.html) — бросаем понятную ошибку
+  return res.text().then((t) => {
+    throw new Error('Expected JSON, got HTML/text: ' + (t.slice(0, 300)))
+  })
+}
 
 export default function App() {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
-  const [user, setUser] = useState(null);
-  const [page, setPage] = useState(token ? 'dashboard' : 'auth');
-  const [search, setSearch] = useState('');
-  const [results, setResults] = useState([]);
-  const [incoming, setIncoming] = useState(null);
-  const [inCall, setInCall] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [videoOff, setVideoOff] = useState(true); // true — видео выключено по-умолчанию
+  const [token, setToken] = useState(localStorage.getItem('token') || '')
+  const [user, setUser] = useState(null)
+  const [page, setPage] = useState(token ? 'dashboard' : 'auth')
+  const [search, setSearch] = useState('')
+  const [results, setResults] = useState([])
+  const [incoming, setIncoming] = useState(null)
+  const [inCall, setInCall] = useState(false)
+  const [muted, setMuted] = useState(false)
+  const [videoEnabled, setVideoEnabled] = useState(false)
 
-  const socketRef = useRef(null);
-  const pcRef = useRef(null);
-  const localStreamRef = useRef(null);   // объект MediaStream содержащий текущие локальные дорожки
-  const remoteStreamRef = useRef(null);
-  const currentPeerInfoRef = useRef({ userId: null, socketId: null }); // target info
+  const socketRef = useRef(null)
+  const pcRef = useRef(null)
+  const localStreamRef = useRef(null)
+  const remoteStreamRef = useRef(null)
+  const currentPeerSocketRef = useRef(null) // socket id of remote peer in current call
 
+  // подключаем socket когда есть токен
   useEffect(() => {
-    if (!token) return;
-
-    const s = io(SIGNALING, { transports: ['websocket'] });
-    socketRef.current = s;
+    if (!token) return
+    const s = io(SIGNALING_URL, { path: '/socket.io', transports: ['websocket'] })
+    socketRef.current = s
 
     s.on('connect', () => {
-      console.log('socket connected', s.id);
-      s.emit('auth', token);
-    });
-
-    s.on('auth-ok', ({ user, socketId }) => {
-      console.log('auth-ok', user);
-      setUser(user);
-    });
-
-    // incoming call from server (callee receives this)
+      s.emit('auth', token)
+    })
+    s.on('auth-ok', ({ user }) => setUser(user))
     s.on('incoming-call', ({ from, fromSocketId, offer }) => {
-      console.log('incoming-call', from, fromSocketId);
-      setIncoming({ from, fromSocketId, offer });
-      // store peer socket id for later use (accept/reject)
-      currentPeerInfoRef.current = { userId: from?.id || null, socketId: fromSocketId || null };
-    });
-
-    // callee accepted our outgoing call -> we receive answer
+      setIncoming({ from, fromSocketId, offer })
+    })
     s.on('call-accepted', async ({ answer, fromSocketId }) => {
-      console.log('call accepted', { fromSocketId });
-      // store peer socket id
-      if (fromSocketId) currentPeerInfoRef.current.socketId = fromSocketId;
-      if (pcRef.current && answer) {
+      if (pcRef.current) {
         try {
-          await pcRef.current.setRemoteDescription(answer);
-          setInCall(true);
+          await pcRef.current.setRemoteDescription(answer)
+          setInCall(true)
+          currentPeerSocketRef.current = fromSocketId
         } catch (e) {
-          console.warn('setRemoteDescription error', e);
+          console.error('setRemoteDescription error', e)
         }
       }
-    });
-
-    s.on('call-rejected', () => {
-      console.log('call rejected');
-      alert('Call rejected');
-      cleanupLocal();
-    });
-
+    })
+    s.on('call-rejected', () => alert('Call rejected'))
     s.on('ice-candidate', async ({ candidate }) => {
-      if (candidate && pcRef.current) {
-        try {
-          await pcRef.current.addIceCandidate(candidate);
-        } catch (e) {
-          console.warn('addIceCandidate failed', e);
-        }
-      }
-    });
-
-    s.on('call-ended', () => {
-      console.log('call-ended');
-      cleanupLocal();
-    });
-
-    // renegotiation: remote requested to add tracks (e.g. enabled camera)
-    s.on('renegotiate-offer', async ({ fromSocketId, offer }) => {
-      console.log('renegotiate-offer', fromSocketId);
-      if (!pcRef.current) return;
       try {
-        await pcRef.current.setRemoteDescription(offer);
-        const answer = await pcRef.current.createAnswer();
-        await pcRef.current.setLocalDescription(answer);
-        s.emit('renegotiate-answer', { toSocketId: fromSocketId, answer: pcRef.current.localDescription });
+        if (pcRef.current && candidate) await pcRef.current.addIceCandidate(candidate)
       } catch (e) {
-        console.error('renegotiate-offer handling failed', e);
+        console.warn('addIceCandidate failed', e)
       }
-    });
+    })
+    s.on('call-ended', () => {
+      cleanupCall()
+    })
 
+    // server may forward renegotiation offers/answers under custom events:
+    s.on('renegotiate-offer', async ({ offer, fromSocketId }) => {
+      // если мы уже в call и получаем reneg offer -> setRemote + createAnswer
+      if (!pcRef.current) return
+      await pcRef.current.setRemoteDescription(offer)
+      const answer = await pcRef.current.createAnswer()
+      await pcRef.current.setLocalDescription(answer)
+      s.emit('renegotiate-answer', { toSocketId: fromSocketId, answer: pcRef.current.localDescription })
+    })
     s.on('renegotiate-answer', async ({ answer }) => {
-      console.log('renegotiate-answer');
-      if (pcRef.current && answer) {
-        try {
-          await pcRef.current.setRemoteDescription(answer);
-        } catch (e) {
-          console.warn('setRemoteDescription (renegotiate-answer) failed', e);
-        }
-      }
-    });
+      if (!pcRef.current) return
+      await pcRef.current.setRemoteDescription(answer)
+    })
 
     return () => {
-      s.disconnect();
-      socketRef.current = null;
-    };
-  }, [token]);
+      try { s.disconnect() } catch(e){}
+      socketRef.current = null
+    }
+  }, [token])
 
-  // --- helpers для WebRTC ---
+  // ========== helpers: peer connection and streams ==========
   function createPeerConnection() {
-    const pc = new RTCPeerConnection();
+    const pc = new RTCPeerConnection()
 
     pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        const toSocketId =
-          currentPeerInfoRef.current.socketId || (incoming && incoming.fromSocketId) || null;
-        if (toSocketId && socketRef.current) {
-          socketRef.current.emit('ice-candidate', { toSocketId, candidate: e.candidate });
-        }
+      if (e.candidate && socketRef.current) {
+        socketRef.current.emit('ice-candidate', { toSocketId: currentPeerSocketRef.current, candidate: e.candidate })
       }
-    };
+    }
 
     pc.ontrack = (e) => {
-      const [stream] = e.streams;
-      console.log('ontrack got stream', stream);
-      remoteStreamRef.current = stream;
-      const remoteVid = document.getElementById('remoteVideo');
-      if (remoteVid) remoteVid.srcObject = stream;
-    };
+      const [stream] = e.streams
+      remoteStreamRef.current = stream
+      const remoteVid = document.getElementById('remoteVideo')
+      if (remoteVid) remoteVid.srcObject = stream
+    }
 
     pc.onconnectionstatechange = () => {
-      console.log('pc connectionState', pc.connectionState);
       if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        cleanupLocal();
-      }
-    };
-
-    return pc;
-  }
-
-  async function ensureLocalStream({ audio = true, video = false } = {}) {
-    // если stream уже есть и содержит нужные дорожки — возвращаем
-    if (localStreamRef.current) {
-      const hasAudio = localStreamRef.current.getAudioTracks().length > 0;
-      const hasVideo = localStreamRef.current.getVideoTracks().length > 0;
-      if ((audio ? hasAudio : true) && (video ? hasVideo : true)) {
-        return localStreamRef.current;
+        cleanupCall()
       }
     }
+    return pc
+  }
 
-    // запросим только те треки, которых не хватает
-    const constraints = {};
-    if (audio) constraints.audio = true;
-    if (video) constraints.video = true;
-
+  async function startLocalAudioOnly() {
+    // Стартуем только с микрофоном (камера выключена)
+    if (localStreamRef.current) return localStreamRef.current
     try {
-      const newStream = await navigator.mediaDevices.getUserMedia(constraints);
-      // если был старый stream — объединим дорожки
-      if (localStreamRef.current) {
-        // добавляем недостающие дорожки в существующий stream
-        newStream.getTracks().forEach((t) => localStreamRef.current.addTrack(t));
-      } else {
-        localStreamRef.current = new MediaStream();
-        newStream.getTracks().forEach((t) => localStreamRef.current.addTrack(t));
+      const s = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      localStreamRef.current = s
+      const localVid = document.getElementById('localVideo')
+      if (localVid) {
+        localVid.srcObject = s
+        localVid.muted = true
       }
-
-      // покажем локальное видео (если есть)
-      const localVid = document.getElementById('localVideo');
-      if (localVid) localVid.srcObject = localStreamRef.current;
-
-      return localStreamRef.current;
+      return s
     } catch (e) {
-      console.error('getUserMedia failed', e);
-      throw e;
+      console.error('getUserMedia audio failed', e)
+      throw e
     }
   }
 
-  // вызывается при старте исходящего звонка: включаем только микрофон (по ТЗ)
-  async function callUser(targetUserId) {
+  async function enableVideoDuringCall() {
+    // Включаем камеру во время звонка — делаем renegotiation
     try {
-      await ensureLocalStream({ audio: true, video: false }); // mic only
-    } catch (e) {
-      alert('Не удалось получить доступ к микрофону: ' + (e.message || e));
-      return;
-    }
-
-    const pc = createPeerConnection();
-    pcRef.current = pc;
-
-    // добавляем аудио дорожки в RTCPeerConnection
-    localStreamRef.current.getAudioTracks().forEach((t) => pc.addTrack(t, localStreamRef.current));
-
-    // create offer and send to server (server должен перекинуть конкретному пользователю)
-    try {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      if (socketRef.current) {
-        socketRef.current.emit('call-user', { toUserId: targetUserId, offer: pc.localDescription });
-        // запомним userId (socket id присвоится когда придет call-accepted или incoming info)
-        currentPeerInfoRef.current.userId = targetUserId;
-      } else {
-        console.error('socket not connected');
-      }
-    } catch (e) {
-      console.error('createOffer failed', e);
-    }
-  }
-
-  // принять вызов — включаем только микрофон, устанавливаем remote offer и отправляем answer
-  async function acceptCall() {
-    if (!incoming) return;
-    try {
-      await ensureLocalStream({ audio: true, video: false }); // mic only
-    } catch (e) {
-      alert('Не удалось получить доступ к микрофону: ' + (e.message || e));
-      return;
-    }
-
-    const pc = createPeerConnection();
-    pcRef.current = pc;
-
-    // добавляем текущие локальные (аудио) треки
-    localStreamRef.current.getAudioTracks().forEach((t) => pc.addTrack(t, localStreamRef.current));
-
-    try {
-      await pc.setRemoteDescription(incoming.offer);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socketRef.current.emit('accept-call', { toSocketId: incoming.fromSocketId, answer: pc.localDescription });
-      setIncoming(null);
-      setInCall(true);
-      // сохраняем собеседника
-      currentPeerInfoRef.current = { userId: incoming.from?.id || null, socketId: incoming.fromSocketId };
-    } catch (e) {
-      console.error('acceptCall failed', e);
-      alert('Ошибка при принятии звонка');
-    }
-  }
-
-  function rejectCall() {
-    if (incoming && socketRef.current) {
-      socketRef.current.emit('reject-call', { toSocketId: incoming.fromSocketId });
-    }
-    setIncoming(null);
-  }
-
-  function cleanupLocal() {
-    if (pcRef.current) {
-      try { pcRef.current.close(); } catch (e) { /* ignore */ }
-      pcRef.current = null;
-    }
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => {
-        try { t.stop(); } catch (e) { /* ignore */ }
-      });
-      localStreamRef.current = null;
-    }
-    const localVid = document.getElementById('localVideo');
-    if (localVid) localVid.srcObject = null;
-    const remoteVid = document.getElementById('remoteVideo');
-    if (remoteVid) remoteVid.srcObject = null;
-    setInCall(false);
-    setVideoOff(true);
-    setMuted(false);
-    currentPeerInfoRef.current = { userId: null, socketId: null };
-  }
-
-  function endCallLocal() {
-    // уведомить собеседника
-    const toSocketId = currentPeerInfoRef.current.socketId;
-    if (toSocketId && socketRef.current) {
-      socketRef.current.emit('end-call', { toSocketId });
-    }
-    cleanupLocal();
-  }
-
-  // переключает mute (микрофон)
-  function toggleMute() {
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((t) => (t.enabled = !t.enabled));
-      setMuted((p) => !p);
-    }
-  }
-
-  // переключение видео: если включаем — получаем video track, добавляем в pc и делаем ренеготиацию
-  async function toggleVideo() {
-    if (videoOff) {
-      // включаем видео
-      try {
-        // получим видеодорожку (и добавим в локальный stream)
-        await ensureLocalStream({ audio: true, video: true });
-
-        // если есть RTCPeerConnection — добавим видеотрек и инициируем renegotiate
-        const pc = pcRef.current;
-        if (pc) {
-          const newVideoTrack = localStreamRef.current.getVideoTracks()[0];
-          if (newVideoTrack) {
-            pc.addTrack(newVideoTrack, localStreamRef.current);
-            // создаём offer для ренеготиации
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            const toSocketId = currentPeerInfoRef.current.socketId || (incoming && incoming.fromSocketId) || null;
-            if (toSocketId && socketRef.current) {
-              socketRef.current.emit('renegotiate-offer', { toSocketId, offer: pc.localDescription });
-            }
-          }
-        }
-
-        setVideoOff(false);
-      } catch (e) {
-        console.error('toggleVideo on failed', e);
-        alert('Не удалось включить камеру: ' + (e.message || e));
-      }
-    } else {
-      // выключаем видео: удаляем video tracks из локального stream и сообщаем
-      if (localStreamRef.current) {
-        localStreamRef.current.getVideoTracks().forEach((t) => {
-          try { t.stop(); } catch (e) { /* ignore */ }
-          localStreamRef.current.removeTrack(t);
-        });
-        const pc = pcRef.current;
-        // NOTE: removeTrack требуется иметь RTCRtpSender; мы упрощаем: закрываем/пересоздаём ПК — проще и надёжнее
-        if (pc) {
-          // инициируем renegotiate without video by creating offer after removing local track
+      const vStream = await navigator.mediaDevices.getUserMedia({ video: true })
+      // добавляем видеодорожки в localStreamRef и в PeerConnection
+      if (!localStreamRef.current) localStreamRef.current = new MediaStream()
+      vStream.getVideoTracks().forEach((t) => {
+        localStreamRef.current.addTrack(t)
+        if (pcRef.current) {
           try {
-            const senders = pc.getSenders();
-            senders.forEach((s) => {
-              if (s.track && s.track.kind === 'video') {
-                try { pc.removeTrack(s); } catch (e) { /* ignore */ }
-              }
-            });
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            const toSocketId = currentPeerInfoRef.current.socketId || (incoming && incoming.fromSocketId) || null;
-            if (toSocketId && socketRef.current) {
-              socketRef.current.emit('renegotiate-offer', { toSocketId, offer: pc.localDescription });
-            }
+            pcRef.current.addTrack(t, localStreamRef.current)
           } catch (e) {
-            console.warn('renegotiate after video stop failed', e);
+            console.warn('addTrack failed (may require renegotiation) ', e)
           }
         }
+      })
+      const localVid = document.getElementById('localVideo')
+      if (localVid) localVid.srcObject = localStreamRef.current
+      setVideoEnabled(true)
+
+      // start renegotiation: createOffer, setLocalDescription, send to peer
+      if (pcRef.current && socketRef.current && currentPeerSocketRef.current) {
+        const offer = await pcRef.current.createOffer()
+        await pcRef.current.setLocalDescription(offer)
+        socketRef.current.emit('renegotiate-offer', { toSocketId: currentPeerSocketRef.current, offer: pcRef.current.localDescription })
       }
-      setVideoOff(true);
-      // обновим отображение локального видео
-      const localVid = document.getElementById('localVideo');
-      if (localVid) localVid.srcObject = localStreamRef.current || null;
+    } catch (e) {
+      console.error('enableVideoDuringCall failed', e)
     }
   }
 
-  // --- auth / api methods ---
+  function toggleMute() {
+    if (!localStreamRef.current) return
+    localStreamRef.current.getAudioTracks().forEach(t => (t.enabled = !t.enabled))
+    setMuted((p) => !p)
+  }
+
+  function toggleVideo() {
+    if (!videoEnabled) {
+      enableVideoDuringCall()
+    } else {
+      // выключаем локально (остановим дорожки)
+      if (localStreamRef.current) {
+        localStreamRef.current.getVideoTracks().forEach(t => { t.stop(); localStreamRef.current.removeTrack(t) })
+        const localVid = document.getElementById('localVideo')
+        if (localVid) localVid.srcObject = localStreamRef.current
+      }
+      setVideoEnabled(false)
+      // note: желательно уведомить remote о renegotiation; пропущено простотой
+    }
+  }
+
+  function cleanupCall() {
+    if (pcRef.current) {
+      try { pcRef.current.close() } catch(e) {}
+      pcRef.current = null
+    }
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(t => t.stop())
+      localStreamRef.current = null
+    }
+    if (remoteStreamRef.current) {
+      remoteStreamRef.current.getTracks().forEach(t => t.stop())
+      remoteStreamRef.current = null
+    }
+    const localVid = document.getElementById('localVideo'); if (localVid) localVid.srcObject = null
+    const remoteVid = document.getElementById('remoteVideo'); if (remoteVid) remoteVid.srcObject = null
+    setIncoming(null); setInCall(false); setVideoEnabled(false); currentPeerSocketRef.current = null
+  }
+
+  // ========== actions: register/login/search/call ==========
   async function register(e) {
-    e.preventDefault();
-    const form = new FormData(e.target);
-    const username = form.get('username');
-    const password = form.get('password');
+    e.preventDefault()
+    const form = new FormData(e.target)
+    const body = { username: form.get('username'), password: form.get('password') }
     try {
-      const res = await fetch(API + '/register', {
+      const res = await fetch(`${API_BASE}/register`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (res.ok && data.token) {
-        localStorage.setItem('token', data.token);
-        setToken(data.token);
-        setPage('dashboard');
+        body: JSON.stringify(body)
+      })
+      const data = await safeJson(res)
+      if (data.token) {
+        localStorage.setItem('token', data.token)
+        setToken(data.token)
+        setPage('dashboard')
       } else {
-        alert(data.error || 'Registration failed');
+        alert(data.error || 'Registration failed')
       }
     } catch (err) {
-      console.error('register error', err);
-      alert('Ошибка сети при регистрации');
+      alert('Register error: ' + err.message)
     }
   }
 
   async function login(e) {
-    e.preventDefault();
-    const form = new FormData(e.target);
-    const username = form.get('username');
-    const password = form.get('password');
+    e.preventDefault()
+    const form = new FormData(e.target)
+    const body = { username: form.get('username'), password: form.get('password') }
     try {
-      const res = await fetch(API + '/login', {
+      const res = await fetch(`${API_BASE}/login`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (res.ok && data.token) {
-        localStorage.setItem('token', data.token);
-        setToken(data.token);
-        setPage('dashboard');
+        body: JSON.stringify(body)
+      })
+      const data = await safeJson(res)
+      if (data.token) {
+        localStorage.setItem('token', data.token)
+        setToken(data.token)
+        setPage('dashboard')
       } else {
-        alert(data.error || 'Login failed');
+        alert(data.error || 'Login failed')
       }
     } catch (err) {
-      console.error('login error', err);
-      alert('Ошибка сети при входе');
+      alert('Login error: ' + err.message)
     }
+  }
+
+  async function logout() {
+    localStorage.removeItem('token')
+    setToken('')
+    setUser(null)
+    setPage('auth')
   }
 
   async function searchUsers() {
     try {
-      const res = await fetch(API + `/users?q=${encodeURIComponent(search)}`);
-      if (!res.ok) {
-        console.warn('search users failed', res.status);
-        const txt = await res.text();
-        console.warn('response text', txt);
-        alert('Поиск вернул ошибку');
-        return;
-      }
-      const data = await res.json();
-      setResults(data || []);
+      // убедимся, что API_BASE корректен и не содержит ws:// и т.п.
+      const url = `${API_BASE.replace(/\/$/, '')}/users?q=${encodeURIComponent(search)}`
+      const res = await fetch(url, { headers: { accept: 'application/json' } })
+      const data = await safeJson(res)
+      setResults(data || [])
     } catch (err) {
-      console.error('search error', err);
-      alert('Ошибка сети при поиске');
+      alert('Search error: ' + err.message)
     }
   }
 
-  function logout() {
-    localStorage.removeItem('token');
-    setToken('');
-    setUser(null);
-    setPage('auth');
-    cleanupLocal();
+  async function callUser(targetId) {
+    try {
+      await startLocalAudioOnly()
+      const pc = createPeerConnection()
+      pcRef.current = pc
+
+      // добавляем локальные аудио дорожки в RTCPeerConnection
+      localStreamRef.current.getTracks().forEach((t) => pc.addTrack(t, localStreamRef.current))
+
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+      // уведомляем signaling
+      if (socketRef.current) {
+        socketRef.current.emit('call-user', { toUserId: targetId, offer: pc.localDescription })
+      }
+    } catch (e) {
+      console.error('callUser failed', e)
+      alert('Call failed: ' + (e.message || e))
+    }
   }
 
-  // --- UI ---
+  async function acceptCall() {
+    if (!incoming) return
+    try {
+      await startLocalAudioOnly()
+      const pc = createPeerConnection()
+      pcRef.current = pc
+
+      // attach local audio tracks
+      localStreamRef.current.getTracks().forEach((t) => pc.addTrack(t, localStreamRef.current))
+
+      // set remote (offer) from incoming
+      await pc.setRemoteDescription(incoming.offer)
+      const answer = await pc.createAnswer()
+      await pc.setLocalDescription(answer)
+
+      // send answer back
+      if (socketRef.current) {
+        socketRef.current.emit('accept-call', { toSocketId: incoming.fromSocketId, answer: pc.localDescription })
+      }
+      currentPeerSocketRef.current = incoming.fromSocketId
+      setIncoming(null)
+      setInCall(true)
+    } catch (e) {
+      console.error('acceptCall failed', e)
+      alert('Accept failed: ' + e.message)
+    }
+  }
+
+  function rejectCall() {
+    if (!incoming) return
+    if (socketRef.current) socketRef.current.emit('reject-call', { toSocketId: incoming.fromSocketId })
+    setIncoming(null)
+  }
+
+  function endCall() {
+    if (socketRef.current && currentPeerSocketRef.current) {
+      socketRef.current.emit('end-call', { toSocketId: currentPeerSocketRef.current })
+    }
+    cleanupCall()
+  }
+
+  // ========== render ==========
   return (
-    <div className="app" style={{ fontFamily: 'system-ui, Arial, sans-serif', padding: 12 }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1>SkyCall</h1>
-        {token && <button onClick={logout}>Logout</button>}
+    <div className="app">
+      <header className="topbar">
+        <h1 style={{ color: '#dff' }}>SkyCall</h1>
+        {token ? <div><button className="btn" onClick={logout}>Logout</button></div> : null}
       </header>
 
       {page === 'auth' && (
-        <div style={{ display: 'flex', gap: 20 }}>
-          <form onSubmit={register} style={{ border: '1px solid #ddd', padding: 12 }}>
-            <h3>Register</h3>
-            <input name="username" placeholder="username" required />
-            <br />
-            <input name="password" placeholder="password" type="password" required />
-            <br />
-            <button>Register</button>
-          </form>
+        <div className="auth">
+          <div className="card" style={{ width: 360 }}>
+            <h2>Register</h2>
+            <form onSubmit={register}>
+              <input name="username" placeholder="username" required />
+              <input name="password" placeholder="password" type="password" required />
+              <button className="btn">Register</button>
+            </form>
+          </div>
 
-          <form onSubmit={login} style={{ border: '1px solid #ddd', padding: 12 }}>
-            <h3>Login</h3>
-            <input name="username" placeholder="username" required />
-            <br />
-            <input name="password" placeholder="password" type="password" required />
-            <br />
-            <button>Login</button>
-          </form>
+          <div className="card" style={{ width: 360 }}>
+            <h2>Login</h2>
+            <form onSubmit={login}>
+              <input name="username" placeholder="username" required />
+              <input name="password" placeholder="password" type="password" required />
+              <button className="btn">Login</button>
+            </form>
+          </div>
         </div>
       )}
 
       {page === 'dashboard' && (
-        <div style={{ display: 'flex', gap: 20, marginTop: 12 }}>
-          <div style={{ width: 260 }}>
-            <h3>Search users</h3>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="search by username" />
-            <button onClick={searchUsers}>Search</button>
-            <ul>
+        <div className="dashboard">
+          <div className="left">
+            <h3 style={{ color: '#dff' }}>Search users</h3>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="search by username" />
+              <button className="btn" onClick={searchUsers}>Search</button>
+            </div>
+
+            <ul className="users">
               {results.map((r) => (
-                <li key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>{r.username}</span>
-                  <button onClick={() => callUser(r.id)}>Call</button>
+                <li key={r.id}>
+                  <span style={{ color: '#e6eef6' }}>{r.username}</span>
+                  <div>
+                    <button className="btn small" onClick={() => callUser(r.id)}>Call</button>
+                  </div>
                 </li>
               ))}
             </ul>
           </div>
 
-          <div style={{ flex: 1 }}>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <video id="localVideo" autoPlay muted playsInline style={{ width: 200, background: '#000' }} />
-              <video id="remoteVideo" autoPlay playsInline style={{ flex: 1, background: '#000' }} />
+          <div className="right card">
+            <div className="videoGrid">
+              <video id="localVideo" autoPlay playsInline muted style={{ width: 320, height: 240, background: '#000' }} />
+              <video id="remoteVideo" autoPlay playsInline style={{ width: 320, height: 240, background: '#000' }} />
             </div>
 
-            <div style={{ marginTop: 8 }}>
-              <button onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
-              <button onClick={toggleVideo}>{videoOff ? 'Turn Camera On' : 'Turn Camera Off'}</button>
-              <button onClick={endCallLocal}>End Call</button>
+            <div className="controls">
+              <button className="btn" onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
+              <button className="btn" onClick={toggleVideo}>{videoEnabled ? 'Turn camera off' : 'Turn camera on'}</button>
+              <button className="btn" onClick={endCall}>End Call</button>
             </div>
           </div>
         </div>
       )}
 
       {incoming && (
-        <div style={{ position: 'fixed', right: 12, bottom: 12, background: '#fff', border: '1px solid #ccc', padding: 12 }}>
-          <div>Incoming call from {incoming.from?.username}</div>
-          <div style={{ marginTop: 8 }}>
-            <button onClick={acceptCall}>Accept</button>
-            <button onClick={rejectCall}>Reject</button>
+        <div className="incoming">
+          <div className="modal card">
+            <h3>Incoming call from {incoming.from?.username || 'user'}</h3>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn" onClick={acceptCall}>Accept</button>
+              <button className="btn" onClick={rejectCall}>Reject</button>
+            </div>
           </div>
         </div>
       )}
 
-      <footer style={{ marginTop: 20 }}>
-        <small>SkyCall — Demo WebRTC app</small>
+      <footer className="footer">
+        <small style={{ color: '#9aa' }}>SkyCall — demo</small>
       </footer>
     </div>
-  );
+  )
 }
