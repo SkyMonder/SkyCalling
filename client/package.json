@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "start": "vite preview --port 5000"
+    "build": "npx vite build",
+    "start": "npx vite preview --port 5000"
   },
   "dependencies": {
     "react": "18.2.0",
