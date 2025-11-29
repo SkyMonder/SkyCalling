@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 
 const API = import.meta.env.VITE_API_URL || '/api';
-const SIGNALING = import.meta.env.VITE_WS_URL || window.location.origin;
+const SIGNALING = import.meta.env.VITE_SIGNALING_URL || 'ws://localhost:10000';
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || '');
@@ -10,55 +10,62 @@ function App() {
   const [page, setPage] = useState(token ? 'dashboard' : 'auth');
   const [search, setSearch] = useState('');
   const [results, setResults] = useState([]);
+  const socketRef = useRef(null);
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
   const [incoming, setIncoming] = useState(null);
   const [inCall, setInCall] = useState(false);
   const [muted, setMuted] = useState(false);
   const [videoOff, setVideoOff] = useState(true);
 
-  const socketRef = useRef(null);
-  const pcRef = useRef(null);
-  const localStreamRef = useRef(null);
-  const remoteStreamRef = useRef(null);
-
   useEffect(() => {
-    if (token) {
-      const socket = io(SIGNALING, { transports: ['websocket'] });
-      socketRef.current = socket;
+    if (!token) return;
+    
+    const s = io(SIGNALING, { transports: ['websocket'] });
+    socketRef.current = s;
 
-      socket.on('connect', () => socket.emit('auth', token));
-      socket.on('auth-ok', ({ user }) => setUser(user));
+    s.on('connect', () => {
+      s.emit('auth', token);
+    });
 
-      socket.on('incoming-call', ({ from, fromSocketId, offer }) => {
-        setIncoming({ from, fromSocketId, offer });
-      });
+    s.on('auth-ok', ({ user }) => setUser(user));
 
-      socket.on('call-accepted', async ({ answer }) => {
-        if (pcRef.current) await pcRef.current.setRemoteDescription(answer);
+    s.on('incoming-call', ({ from, fromSocketId, offer }) => {
+      setIncoming({ from, fromSocketId, offer });
+    });
+
+    s.on('call-accepted', async ({ answer }) => {
+      if (pcRef.current) {
+        await pcRef.current.setRemoteDescription(answer);
         setInCall(true);
-      });
+      }
+    });
 
-      socket.on('call-rejected', () => alert('Call rejected'));
+    s.on('call-rejected', () => alert('Call rejected'));
 
-      socket.on('ice-candidate', async ({ candidate }) => {
-        if (candidate && pcRef.current) {
-          try { await pcRef.current.addIceCandidate(candidate); } catch(e) { console.warn(e); }
-        }
-      });
+    s.on('ice-candidate', async ({ candidate }) => {
+      if (candidate && pcRef.current) {
+        try { await pcRef.current.addIceCandidate(candidate); } 
+        catch (e) { console.warn(e); }
+      }
+    });
 
-      socket.on('call-ended', () => endCallLocal());
+    s.on('call-ended', () => endCallLocal());
 
-      return () => socket.disconnect();
-    }
+    return () => s.disconnect();
   }, [token]);
 
+  // ====== Auth ======
   async function register(e) {
     e.preventDefault();
     const form = new FormData(e.target);
     const username = form.get('username');
     const password = form.get('password');
-    const res = await fetch(API + '/register', {
+
+    const res = await fetch(`${API}/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username, password })
     });
     const data = await res.json();
@@ -66,9 +73,7 @@ function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setPage('dashboard');
-    } else {
-      alert(data.error || 'Registration failed');
-    }
+    } else alert(data.error || 'Registration failed');
   }
 
   async function login(e) {
@@ -76,9 +81,10 @@ function App() {
     const form = new FormData(e.target);
     const username = form.get('username');
     const password = form.get('password');
-    const res = await fetch(API + '/login', {
+
+    const res = await fetch(`${API}/login`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username, password })
     });
     const data = await res.json();
@@ -86,31 +92,34 @@ function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setPage('dashboard');
-    } else {
-      alert(data.error || 'Login failed');
-    }
+    } else alert(data.error || 'Login failed');
   }
 
+  // ====== Users ======
   async function searchUsers() {
-    const res = await fetch(API + `/users?q=${encodeURIComponent(search)}`);
+    const res = await fetch(`${API}/users?q=${encodeURIComponent(search)}`);
     const data = await res.json();
     setResults(data);
   }
 
-  async function startLocalStream(video = false) {
-    const s = await navigator.mediaDevices.getUserMedia({ audio: true, video });
-    localStreamRef.current = s;
+  // ====== Call ======
+  async function startLocalStream(audioOnly = true) {
+    const s = await navigator.mediaDevices.getUserMedia({ 
+      audio: true, 
+      video: !audioOnly 
+    });
     const localVid = document.getElementById('localVideo');
-    if (localVid) localVid.srcObject = s;
+    localVid.srcObject = s;
+    localStreamRef.current = s;
   }
 
   function createPeerConnection() {
     const pc = new RTCPeerConnection();
     pc.onicecandidate = e => {
       if (e.candidate) {
-        socketRef.current.emit('ice-candidate', { 
-          toSocketId: incoming ? incoming.fromSocketId : null, 
-          candidate: e.candidate 
+        socketRef.current.emit('ice-candidate', {
+          toSocketId: incoming ? incoming.fromSocketId : null,
+          candidate: e.candidate
         });
       }
     };
@@ -126,7 +135,7 @@ function App() {
   }
 
   async function callUser(targetId) {
-    await startLocalStream(false); // микрофон включен, камера выключена
+    await startLocalStream(true); // только микрофон
     const pc = createPeerConnection();
     pcRef.current = pc;
     localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
@@ -136,7 +145,7 @@ function App() {
   }
 
   async function acceptCall() {
-    await startLocalStream(false);
+    await startLocalStream(true); // только микрофон
     const pc = createPeerConnection();
     pcRef.current = pc;
     localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
@@ -154,10 +163,7 @@ function App() {
   }
 
   function endCallLocal() {
-    if (pcRef.current) {
-      pcRef.current.close();
-      pcRef.current = null;
-    }
+    if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(t => t.stop());
       localStreamRef.current = null;
@@ -176,15 +182,11 @@ function App() {
     }
   }
 
-  async function toggleVideo() {
-    if (videoOff) {
-      await startLocalStream(true); // включаем камеру
-      localStreamRef.current.getAudioTracks().forEach(t => t.enabled = !muted);
-      localStreamRef.current.getVideoTracks().forEach(t => t.enabled = true);
-    } else if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach(t => t.enabled = false);
+  function toggleVideo() {
+    if (localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach(t => t.enabled = !t.enabled);
+      setVideoOff(prev => !prev);
     }
-    setVideoOff(prev => !prev);
   }
 
   function logout() {
@@ -194,11 +196,12 @@ function App() {
     setPage('auth');
   }
 
+  // ====== JSX ======
   return (
     <div className='app'>
       <header className='topbar'>
         <h1>SkyCall</h1>
-        {token && <button onClick={logout} className='btn'>Logout</button>}
+        {token && <button className='btn' onClick={logout}>Logout</button>}
       </header>
 
       {page === 'auth' && (
@@ -207,7 +210,7 @@ function App() {
             <h2>Register</h2>
             <form onSubmit={register}>
               <input name='username' placeholder='username' required />
-              <input name='password' type='password' placeholder='password' required />
+              <input name='password' placeholder='password' type='password' required />
               <button className='btn'>Register</button>
             </form>
           </div>
@@ -215,7 +218,7 @@ function App() {
             <h2>Login</h2>
             <form onSubmit={login}>
               <input name='username' placeholder='username' required />
-              <input name='password' type='password' placeholder='password' required />
+              <input name='password' placeholder='password' type='password' required />
               <button className='btn'>Login</button>
             </form>
           </div>
@@ -256,7 +259,7 @@ function App() {
       {incoming && (
         <div className='incoming'>
           <div className='modal'>
-            <h3>Incoming call from {incoming.from}</h3>
+            <h3>Incoming call from {incoming.from.username}</h3>
             <div className='modalControls'>
               <button className='btn' onClick={acceptCall}>Accept</button>
               <button className='btn' onClick={rejectCall}>Reject</button>
