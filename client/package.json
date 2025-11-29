@@ -4,13 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "npx vite build",
-    "start": "vite preview --port 5000"
+    "build": "vite build",
+    "start": "npx serve -s dist -l 5000"
   },
   "dependencies": {
     "react": "18.2.0",
     "react-dom": "18.2.0",
-    "socket.io-client": "4.7.2"
+    "socket.io-client": "4.7.2",
+    "serve": "^14.2.0"
   },
   "devDependencies": {
     "vite": "4.4.9",
