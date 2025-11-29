@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "npx vite",
-    "build": "npx vite build",
-    "start": "npx vite preview --port 5000"
+    "dev": "vite",
+    "build": "vite build",
+    "start": "vite preview --port 5000"
   },
   "dependencies": {
     "react": "18.2.0",
