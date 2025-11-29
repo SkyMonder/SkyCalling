@@ -17,31 +17,42 @@ function App() {
   const [incoming, setIncoming] = useState(null);
   const [inCall, setInCall] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [videoOff, setVideoOff] = useState(true); // видео выключено по умолчанию
+  const [videoOff, setVideoOff] = useState(true);
 
   useEffect(() => {
     if (token) {
-      const s = io(import.meta.env.VITE_SIGNALING_URL || 'http://localhost:4000', {
-        transports: ['websocket']
+      const s = io(import.meta.env.VITE_SIGNALING_URL || "http://localhost:4000", {
+        transports: ["websocket"]
       });
       socketRef.current = s;
 
-      s.on('connect', () => s.emit('auth', token));
+      s.on('connect', () => {
+        s.emit('auth', token);
+      });
+
       s.on('auth-ok', ({ user }) => setUser(user));
-      s.on('incoming-call', ({ from, fromSocketId, offer }) => setIncoming({ from, fromSocketId, offer }));
+
+      s.on('incoming-call', ({ from, fromSocketId, offer }) => {
+        setIncoming({ from, fromSocketId, offer });
+      });
+
       s.on('call-accepted', async ({ answer }) => {
         if (pcRef.current) {
           await pcRef.current.setRemoteDescription(answer);
           setInCall(true);
         }
       });
+
       s.on('call-rejected', () => alert('Call rejected'));
+
       s.on('ice-candidate', async ({ candidate }) => {
         if (candidate && pcRef.current) {
           try { await pcRef.current.addIceCandidate(candidate); } catch (e) { console.warn(e); }
         }
       });
+
       s.on('call-ended', () => endCallLocal());
+
       return () => s.disconnect();
     }
   }, [token]);
@@ -61,9 +72,7 @@ function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setPage('dashboard');
-    } else {
-      alert(data.error || 'Registration failed');
-    }
+    } else { alert(data.error || 'Registration failed'); }
   }
 
   async function login(e) {
@@ -81,9 +90,7 @@ function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setPage('dashboard');
-    } else {
-      alert(data.error || 'Login failed');
-    }
+    } else { alert(data.error || 'Login failed'); }
   }
 
   async function searchUsers() {
@@ -92,13 +99,39 @@ function App() {
     setResults(data);
   }
 
+  async function startLocalStream() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: { facingMode: "user" }
+      });
+
+      // Видео выключено по умолчанию
+      stream.getVideoTracks().forEach(track => track.enabled = false);
+
+      const localVid = document.getElementById('localVideo');
+      localVid.srcObject = stream;
+
+      localStreamRef.current = stream;
+      setVideoOff(true);
+    } catch (err) {
+      console.error('Ошибка доступа к устройствам:', err);
+      alert('Не удалось получить доступ к микрофону или камере. Проверьте подключение устройств и разрешения браузера.');
+    }
+  }
+
   function createPeerConnection() {
     const pc = new RTCPeerConnection();
+
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        socketRef.current.emit('ice-candidate', { toSocketId: incoming ? incoming.fromSocketId : null, candidate: e.candidate });
+        socketRef.current.emit('ice-candidate', {
+          toSocketId: incoming ? incoming.fromSocketId : null,
+          candidate: e.candidate
+        });
       }
     };
+
     pc.ontrack = (e) => {
       const [stream] = e.streams;
       const remoteVid = document.getElementById('remoteVideo');
@@ -107,22 +140,8 @@ function App() {
         remoteStreamRef.current = stream;
       }
     };
+
     return pc;
-  }
-
-  async function startLocalStream() {
-    // Получаем только аудио
-    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    localStreamRef.current = audioStream;
-
-    // Получаем видео-трек, но выключенный
-    const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
-    const videoTrack = videoStream.getVideoTracks()[0];
-    videoTrack.enabled = false; // выключен по умолчанию
-    audioStream.addTrack(videoTrack);
-
-    const localVid = document.getElementById('localVideo');
-    localVid.srcObject = audioStream;
   }
 
   async function callUser(targetId) {
@@ -130,7 +149,6 @@ function App() {
     const pc = createPeerConnection();
     pcRef.current = pc;
     localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
-
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     socketRef.current.emit('call-user', { toUserId: targetId, offer: pc.localDescription });
@@ -141,7 +159,6 @@ function App() {
     const pc = createPeerConnection();
     pcRef.current = pc;
     localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
-
     await pc.setRemoteDescription(incoming.offer);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -169,7 +186,6 @@ function App() {
     const remoteVid = document.getElementById('remoteVideo');
     if (remoteVid) remoteVid.srcObject = null;
     setInCall(false);
-    setVideoOff(true);
   }
 
   function toggleMute() {
@@ -181,9 +197,9 @@ function App() {
 
   function toggleVideo() {
     if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      videoTrack.enabled = !videoTrack.enabled;
-      setVideoOff(!videoTrack.enabled);
+      const enabled = !videoOff;
+      localStreamRef.current.getVideoTracks().forEach(t => t.enabled = enabled);
+      setVideoOff(prev => !prev);
     }
   }
 
