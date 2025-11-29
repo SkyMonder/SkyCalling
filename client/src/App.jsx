@@ -155,15 +155,30 @@ function App() {
 
   // Включение видео по запросу
   async function enableVideo() {
-    if (!localStreamRef.current) return;
-    const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
-    videoStream.getVideoTracks().forEach(track => localStreamRef.current.addTrack(track));
+  if (!localStreamRef.current || !pcRef.current) return;
 
-    const localVid = document.getElementById('localVideo');
-    if (localVid) localVid.srcObject = localStreamRef.current;
+  // получаем видеопоток
+  const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+  const videoTrack = videoStream.getVideoTracks()[0];
 
-    setVideoOff(false);
+  // ищем RTCRtpSender для видео
+  const sender = pcRef.current.getSenders().find(s => s.track && s.track.kind === 'video');
+
+  if (sender) {
+    // если видео-трек уже есть, заменяем его
+    await sender.replaceTrack(videoTrack);
+  } else {
+    // иначе добавляем новый трек в соединение
+    pcRef.current.addTrack(videoTrack, localStreamRef.current);
   }
+
+  // добавляем локально для отображения
+  localStreamRef.current.addTrack(videoTrack);
+  const localVid = document.getElementById('localVideo');
+  if (localVid) localVid.srcObject = localStreamRef.current;
+
+  setVideoOff(false);
+}
 
   function rejectCall() {
     if (incoming) socketRef.current.emit('reject-call', { toSocketId: incoming.fromSocketId });
