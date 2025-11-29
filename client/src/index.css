@@ -1,0 +1,65 @@
+/* src/index.css */
+body {
+  margin: 0;
+  font-family: sans-serif;
+  background: #f5f5f5;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  background: #0077ff;
+  color: white;
+}
+
+.btn {
+  padding: 0.3rem 0.7rem;
+  margin: 0.2rem;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.dashboard {
+  display: flex;
+  flex: 1;
+}
+
+.left, .right {
+  padding: 1rem;
+}
+
+.videoGrid {
+  display: flex;
+  gap: 0.5rem;
+}
+
+video {
+  width: 300px;
+  height: 200px;
+  background: black;
+}
+
+.controls {
+  margin-top: 0.5rem;
+}
+
+.auth {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.card {
+  padding: 1rem;
+  background: white;
+  border-radius: 5px;
+}
