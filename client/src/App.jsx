@@ -1,102 +1,123 @@
-import React, { useEffect, useState } from "react";
-import io from "socket.io-client";
-import CallModal from "./CallModal";
-import CallPage from "./CallPage";
+import express from "express";
+import http from "http";
+import cors from "cors";
+import { Server } from "socket.io";
+import mongoose from "mongoose";
 
-const socket = io("https://skycalling.onrender.com:10000", {
-    transports: ["websocket"]
+// ====================== DB CONNECT ======================
+mongoose.connect(process.env.MONGO_URL, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
 });
 
-export default function App() {
-    const [userId, setUserId] = useState("");
-    const [inputId, setInputId] = useState("");
+// ======= USER MODEL =======
+const UserSchema = new mongoose.Schema({
+    username: String,
+    password: String
+});
+const User = mongoose.model("User", UserSchema);
 
-    const [incomingCall, setIncomingCall] = useState(null);
-    const [activeCall, setActiveCall] = useState(null);
+// ====================== APP ======================
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-    // РЕГИСТРАЦИЯ СОКЕТА
-    useEffect(() => {
-        if (!userId) return;
-        socket.emit("register", userId);
-    }, [userId]);
+// ====================== AUTH API ======================
 
-    // ПОЛУЧЕНИЕ ВХОДЯЩЕГО
-    useEffect(() => {
-        socket.on("incoming-call", (data) => {
-            console.log("INCOMING CALL:", data);
-            setIncomingCall(data);
-        });
+// REGISTER
+app.post("/api/register", async (req, res) => {
+    const { username, password } = req.body;
 
-        socket.on("call-rejected", () => {
-            alert("Звонок отклонён");
-            setActiveCall(null);
-        });
+    const exists = await User.findOne({ username });
+    if (exists) return res.status(400).json({ error: "User exists" });
 
-        socket.on("call-accepted", ({ from }) => {
-            setActiveCall(from);
-        });
+    const user = new User({ username, password });
+    await user.save();
 
-        return () => {
-            socket.off("incoming-call");
-            socket.off("call-rejected");
-            socket.off("call-accepted");
-        };
-    }, []);
+    res.json({ success: true });
+});
 
-    const callUser = () => {
-        socket.emit("call-user", {
-            from: userId,
-            to: inputId
-        });
-        setActiveCall(inputId);
-    };
+// LOGIN
+app.post("/api/login", async (req, res) => {
+    const { username, password } = req.body;
 
-    return (
-        <div style={{ padding: 20 }}>
-            {!userId && (
-                <>
-                    <h2>Введите ваш ID:</h2>
-                    <input value={inputId} onChange={(e) => setInputId(e.target.value)} />
-                    <button onClick={() => setUserId(inputId)}>OK</button>
-                </>
-            )}
+    const user = await User.findOne({ username, password });
+    if (!user) return res.status(404).json({ error: "Invalid credentials" });
 
-            {userId && !activeCall && (
-                <>
-                    <h2>Ваш ID: {userId}</h2>
-                    <input placeholder="Кого вызвать?" value={inputId} onChange={e => setInputId(e.target.value)} />
-                    <button onClick={callUser}>Позвонить</button>
-                </>
-            )}
+    res.json({
+        id: user._id,
+        username: user.username
+    });
+});
 
-            {incomingCall && (
-                <CallModal
-                    from={incomingCall.from}
-                    onAccept={() => {
-                        socket.emit("call-accepted", {
-                            from: incomingCall.from,
-                            to: userId
-                        });
-                        setActiveCall(incomingCall.from);
-                        setIncomingCall(null);
-                    }}
-                    onReject={() => {
-                        socket.emit("call-rejected", {
-                            from: incomingCall.from,
-                            to: userId
-                        });
-                        setIncomingCall(null);
-                    }}
-                />
-            )}
+// ====================== USERS SEARCH ======================
+app.get("/api/users", async (req, res) => {
+    const q = (req.query.q || "").trim();
 
-            {activeCall && (
-                <CallPage
-                    myId={userId}
-                    peerId={activeCall}
-                    socket={socket}
-                />
-            )}
-        </div>
-    );
-}
+    if (!q) return res.json([]);
+
+    const users = await User.find({
+        username: { $regex: q, $options: "i" }
+    });
+
+    res.json(users.map(u => ({
+        id: u._id,
+        username: u.username
+    })));
+});
+
+// ====================== SOCKET / WEBRTC ======================
+const server = http.createServer(app);
+
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
+
+const onlineUsers = new Map();
+
+// --- when connected ---
+io.on("connection", socket => {
+    console.log("Socket connected:", socket.id);
+
+    // user connected
+    socket.on("online", userId => {
+        onlineUsers.set(userId, socket.id);
+    });
+
+    // call
+    socket.on("call-user", ({ to, offer, from }) => {
+        const target = onlineUsers.get(to);
+        if (target)
+            io.to(target).emit("incoming-call", { from, offer });
+    });
+
+    // answer
+    socket.on("answer-call", ({ to, answer }) => {
+        const target = onlineUsers.get(to);
+        if (target)
+            io.to(target).emit("call-answered", { answer });
+    });
+
+    // ICE
+    socket.on("ice-candidate", ({ to, candidate }) => {
+        const target = onlineUsers.get(to);
+        if (target)
+            io.to(target).emit("ice-candidate", candidate);
+    });
+
+    // disconnect
+    socket.on("disconnect", () => {
+        for (const [uid, sid] of onlineUsers.entries()) {
+            if (sid === socket.id) onlineUsers.delete(uid);
+        }
+    });
+});
+
+// ====================== START ======================
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+    console.log("Server running on port", PORT);
+});
