@@ -1,107 +1,74 @@
-const express = require('express');
-const http = require('http');
-const cors = require('cors');
-const { Server } = require('socket.io');
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
-const path = require('path');
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
-
 app.use(cors());
 app.use(express.json());
 
-// Simple in-memory store (for demo only)
-const USERS = []; // { id, username, passwordHash }
-const SOCKETS = {}; // userId -> socketId
-
-const JWT_SECRET = process.env.JWT_SECRET || 'devsecret';
-
-app.post('/api/register', async (req, res) => {
-  const { username, password } = req.body;
-  if(!username || !password) return res.status(400).json({ error: 'username and password required' });
-  if(USERS.find(u => u.username === username)) return res.status(400).json({ error: 'username exists' });
-  const passwordHash = await bcrypt.hash(password, 8);
-  const id = Date.now().toString();
-  USERS.push({ id, username, passwordHash });
-  const token = jwt.sign({ id, username }, JWT_SECRET);
-  res.json({ token, user: { id, username } });
-});
-
-app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
-  const u = USERS.find(x => x.username === username);
-  if(!u) return res.status(400).json({ error: 'invalid credentials' });
-  const ok = await bcrypt.compare(password, u.passwordHash);
-  if(!ok) return res.status(400).json({ error: 'invalid credentials' });
-  const token = jwt.sign({ id: u.id, username: u.username }, JWT_SECRET);
-  res.json({ token, user: { id: u.id, username: u.username } });
-});
-
+// Простейший API для теста
 app.get('/api/users', (req, res) => {
-  const q = (req.query.q || '').toLowerCase();
-  const results = USERS.filter(u => u.username.toLowerCase().includes(q)).map(u=>({ id: u.id, username: u.username }));
-  res.json(results);
+  const q = req.query.q?.toLowerCase();
+  const users = [
+    { id: '1', username: 'Alice' },
+    { id: '2', username: 'Bob' },
+    { id: '3', username: 'Joker' }
+  ];
+  if (q) {
+    return res.json(users.filter(u => u.username.toLowerCase().includes(q)));
+  }
+  res.json(users);
 });
 
-// Serve frontend build if present
-const clientDist = path.join(__dirname, '..', 'client', 'dist');
-if (require('fs').existsSync(clientDist)) {
-  app.use(express.static(clientDist));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(clientDist, 'index.html'));
-  });
-}
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: '*' } // можно ограничить доменом фронтенда
+});
 
-io.on('connection', (socket) => {
-  console.log('socket connected', socket.id);
+io.on('connection', socket => {
+  console.log('new socket:', socket.id);
 
-  socket.on('auth', (token) => {
-    try {
-      const data = jwt.verify(token, JWT_SECRET);
-      socket.user = data;
-      SOCKETS[data.id] = socket.id;
-      io.to(socket.id).emit('auth-ok', { user: data });
-      console.log('authenticated', data.username);
-    } catch(e) {
-      io.to(socket.id).emit('auth-failed');
-    }
+  socket.on('auth', token => {
+    console.log('auth token', token);
+    // простой mock user
+    socket.user = { id: socket.id, username: `User-${socket.id.slice(0,4)}` };
+    socket.emit('auth-ok', { user: socket.user });
   });
 
   socket.on('call-user', ({ toUserId, offer }) => {
-    const toSocket = SOCKETS[toUserId];
-    if (toSocket) {
-      io.to(toSocket).emit('incoming-call', { from: socket.user, fromSocketId: socket.id, offer });
-    } else {
-      io.to(socket.id).emit('user-unavailable');
+    const target = Array.from(io.sockets.sockets.values())
+      .find(s => s.user?.id === toUserId);
+    if (target) {
+      target.emit('incoming-call', { from: socket.user, fromSocketId: socket.id, offer });
     }
   });
 
   socket.on('accept-call', ({ toSocketId, answer }) => {
-    io.to(toSocketId).emit('call-accepted', { answer, by: socket.user });
+    const target = io.sockets.sockets.get(toSocketId);
+    if (target) target.emit('call-accepted', { answer });
   });
 
   socket.on('reject-call', ({ toSocketId }) => {
-    io.to(toSocketId).emit('call-rejected', { by: socket.user });
+    const target = io.sockets.sockets.get(toSocketId);
+    if (target) target.emit('call-rejected');
   });
 
   socket.on('ice-candidate', ({ toSocketId, candidate }) => {
-    io.to(toSocketId).emit('ice-candidate', { candidate, from: socket.user });
+    const target = io.sockets.sockets.get(toSocketId);
+    if (target) target.emit('ice-candidate', { candidate });
   });
 
   socket.on('end-call', ({ toSocketId }) => {
-    io.to(toSocketId).emit('call-ended', { by: socket.user });
+    const target = io.sockets.sockets.get(toSocketId);
+    if (target) target.emit('call-ended');
   });
 
   socket.on('disconnect', () => {
-    if (socket.user) {
-      delete SOCKETS[socket.user.id];
-    }
-    console.log('socket disconnected', socket.id);
+    console.log('disconnected', socket.id);
   });
 });
 
-const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => console.log('Server listening on', PORT));
+// Render задаёт порт через env
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
