@@ -10,7 +10,7 @@
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "socket.io-client": "^4.7.2"  // обязательно в dependencies
+    "socket.io-client": "^4.7.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^3.2.0",
