@@ -1,123 +1,102 @@
-import express from "express";
-import http from "http";
-import cors from "cors";
-import { Server } from "socket.io";
-import mongoose from "mongoose";
+import React, { useEffect, useState } from "react";
+import io from "socket.io-client";
+import CallModal from "./CallModal";
+import CallPage from "./CallPage";
 
-// ====================== DB CONNECT ======================
-mongoose.connect(process.env.MONGO_URL, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true
+const socket = io("https://skycalling.onrender.com:10000", {
+    transports: ["websocket"]
 });
 
-// ======= USER MODEL =======
-const UserSchema = new mongoose.Schema({
-    username: String,
-    password: String
-});
-const User = mongoose.model("User", UserSchema);
+export default function App() {
+    const [userId, setUserId] = useState("");
+    const [inputId, setInputId] = useState("");
 
-// ====================== APP ======================
-const app = express();
-app.use(cors());
-app.use(express.json());
+    const [incomingCall, setIncomingCall] = useState(null);
+    const [activeCall, setActiveCall] = useState(null);
 
-// ====================== AUTH API ======================
+    // РЕГИСТРАЦИЯ СОКЕТА
+    useEffect(() => {
+        if (!userId) return;
+        socket.emit("register", userId);
+    }, [userId]);
 
-// REGISTER
-app.post("/api/register", async (req, res) => {
-    const { username, password } = req.body;
+    // ПОЛУЧЕНИЕ ВХОДЯЩЕГО
+    useEffect(() => {
+        socket.on("incoming-call", (data) => {
+            console.log("INCOMING CALL:", data);
+            setIncomingCall(data);
+        });
 
-    const exists = await User.findOne({ username });
-    if (exists) return res.status(400).json({ error: "User exists" });
+        socket.on("call-rejected", () => {
+            alert("Звонок отклонён");
+            setActiveCall(null);
+        });
 
-    const user = new User({ username, password });
-    await user.save();
+        socket.on("call-accepted", ({ from }) => {
+            setActiveCall(from);
+        });
 
-    res.json({ success: true });
-});
+        return () => {
+            socket.off("incoming-call");
+            socket.off("call-rejected");
+            socket.off("call-accepted");
+        };
+    }, []);
 
-// LOGIN
-app.post("/api/login", async (req, res) => {
-    const { username, password } = req.body;
+    const callUser = () => {
+        socket.emit("call-user", {
+            from: userId,
+            to: inputId
+        });
+        setActiveCall(inputId);
+    };
 
-    const user = await User.findOne({ username, password });
-    if (!user) return res.status(404).json({ error: "Invalid credentials" });
+    return (
+        <div style={{ padding: 20 }}>
+            {!userId && (
+                <>
+                    <h2>Введите ваш ID:</h2>
+                    <input value={inputId} onChange={(e) => setInputId(e.target.value)} />
+                    <button onClick={() => setUserId(inputId)}>OK</button>
+                </>
+            )}
 
-    res.json({
-        id: user._id,
-        username: user.username
-    });
-});
+            {userId && !activeCall && (
+                <>
+                    <h2>Ваш ID: {userId}</h2>
+                    <input placeholder="Кого вызвать?" value={inputId} onChange={e => setInputId(e.target.value)} />
+                    <button onClick={callUser}>Позвонить</button>
+                </>
+            )}
 
-// ====================== USERS SEARCH ======================
-app.get("/api/users", async (req, res) => {
-    const q = (req.query.q || "").trim();
+            {incomingCall && (
+                <CallModal
+                    from={incomingCall.from}
+                    onAccept={() => {
+                        socket.emit("call-accepted", {
+                            from: incomingCall.from,
+                            to: userId
+                        });
+                        setActiveCall(incomingCall.from);
+                        setIncomingCall(null);
+                    }}
+                    onReject={() => {
+                        socket.emit("call-rejected", {
+                            from: incomingCall.from,
+                            to: userId
+                        });
+                        setIncomingCall(null);
+                    }}
+                />
+            )}
 
-    if (!q) return res.json([]);
-
-    const users = await User.find({
-        username: { $regex: q, $options: "i" }
-    });
-
-    res.json(users.map(u => ({
-        id: u._id,
-        username: u.username
-    })));
-});
-
-// ====================== SOCKET / WEBRTC ======================
-const server = http.createServer(app);
-
-const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
-});
-
-const onlineUsers = new Map();
-
-// --- when connected ---
-io.on("connection", socket => {
-    console.log("Socket connected:", socket.id);
-
-    // user connected
-    socket.on("online", userId => {
-        onlineUsers.set(userId, socket.id);
-    });
-
-    // call
-    socket.on("call-user", ({ to, offer, from }) => {
-        const target = onlineUsers.get(to);
-        if (target)
-            io.to(target).emit("incoming-call", { from, offer });
-    });
-
-    // answer
-    socket.on("answer-call", ({ to, answer }) => {
-        const target = onlineUsers.get(to);
-        if (target)
-            io.to(target).emit("call-answered", { answer });
-    });
-
-    // ICE
-    socket.on("ice-candidate", ({ to, candidate }) => {
-        const target = onlineUsers.get(to);
-        if (target)
-            io.to(target).emit("ice-candidate", candidate);
-    });
-
-    // disconnect
-    socket.on("disconnect", () => {
-        for (const [uid, sid] of onlineUsers.entries()) {
-            if (sid === socket.id) onlineUsers.delete(uid);
-        }
-    });
-});
-
-// ====================== START ======================
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-    console.log("Server running on port", PORT);
-});
+            {activeCall && (
+                <CallPage
+                    myId={userId}
+                    peerId={activeCall}
+                    socket={socket}
+                />
+            )}
+        </div>
+    );
+}
