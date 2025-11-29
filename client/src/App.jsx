@@ -157,25 +157,25 @@ function App() {
   async function enableVideo() {
   if (!localStreamRef.current || !pcRef.current) return;
 
-  // получаем видеопоток
   const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
   const videoTrack = videoStream.getVideoTracks()[0];
 
-  // ищем RTCRtpSender для видео
-  const sender = pcRef.current.getSenders().find(s => s.track && s.track.kind === 'video');
-
-  if (sender) {
-    // если видео-трек уже есть, заменяем его
-    await sender.replaceTrack(videoTrack);
-  } else {
-    // иначе добавляем новый трек в соединение
-    pcRef.current.addTrack(videoTrack, localStreamRef.current);
-  }
-
-  // добавляем локально для отображения
+  // добавляем трек в локальный поток
   localStreamRef.current.addTrack(videoTrack);
   const localVid = document.getElementById('localVideo');
   if (localVid) localVid.srcObject = localStreamRef.current;
+
+  // добавляем трек в RTCPeerConnection
+  const sender = pcRef.current.addTrack(videoTrack, localStreamRef.current);
+
+  // создаём новый offer и отправляем его другому пользователю
+  const offer = await pcRef.current.createOffer();
+  await pcRef.current.setLocalDescription(offer);
+
+  socketRef.current.emit('renegotiate', {
+    toSocketId: incoming ? incoming.fromSocketId : null,
+    offer: pcRef.current.localDescription
+  });
 
   setVideoOff(false);
 }
