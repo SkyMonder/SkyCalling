@@ -10,51 +10,48 @@ function App() {
   const [page, setPage] = useState(token ? 'dashboard' : 'auth');
   const [search, setSearch] = useState('');
   const [results, setResults] = useState([]);
+  const [incoming, setIncoming] = useState(null);
+  const [inCall, setInCall] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [videoOff, setVideoOff] = useState(true); // камера выключена по умолчанию
+
   const socketRef = useRef(null);
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteStreamRef = useRef(null);
-  const [incoming, setIncoming] = useState(null);
-  const [inCall, setInCall] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [videoOff, setVideoOff] = useState(true);
+  const currentCallTargetSocketId = useRef(null);
 
   useEffect(() => {
-    if (token) {
-      const s = io(import.meta.env.VITE_SIGNALING_URL || "http://localhost:4000", {
-        transports: ["websocket"]
-      });
-      socketRef.current = s;
+    if (!token) return;
+    const s = io(SIGNALING, { transports: ['websocket'] });
+    socketRef.current = s;
 
-      s.on('connect', () => {
-        s.emit('auth', token);
-      });
+    s.on('connect', () => s.emit('auth', token));
 
-      s.on('auth-ok', ({ user }) => setUser(user));
+    s.on('auth-ok', ({ user }) => setUser(user));
 
-      s.on('incoming-call', ({ from, fromSocketId, offer }) => {
-        setIncoming({ from, fromSocketId, offer });
-      });
+    s.on('incoming-call', ({ from, fromSocketId, offer }) => {
+      setIncoming({ from, fromSocketId, offer });
+    });
 
-      s.on('call-accepted', async ({ answer }) => {
-        if (pcRef.current) {
-          await pcRef.current.setRemoteDescription(answer);
-          setInCall(true);
-        }
-      });
+    s.on('call-accepted', async ({ answer }) => {
+      if (pcRef.current) {
+        await pcRef.current.setRemoteDescription(answer);
+        setInCall(true);
+      }
+    });
 
-      s.on('call-rejected', () => alert('Call rejected'));
+    s.on('call-rejected', () => alert('Call rejected'));
 
-      s.on('ice-candidate', async ({ candidate }) => {
-        if (candidate && pcRef.current) {
-          try { await pcRef.current.addIceCandidate(candidate); } catch (e) { console.warn(e); }
-        }
-      });
+    s.on('ice-candidate', async ({ candidate }) => {
+      if (candidate && pcRef.current) {
+        try { await pcRef.current.addIceCandidate(candidate); } catch (e) { console.warn(e); }
+      }
+    });
 
-      s.on('call-ended', () => endCallLocal());
+    s.on('call-ended', endCallLocal);
 
-      return () => s.disconnect();
-    }
+    return () => s.disconnect();
   }, [token]);
 
   async function register(e) {
@@ -72,7 +69,7 @@ function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setPage('dashboard');
-    } else { alert(data.error || 'Registration failed'); }
+    } else alert(data.error || 'Registration failed');
   }
 
   async function login(e) {
@@ -90,7 +87,7 @@ function App() {
       localStorage.setItem('token', data.token);
       setToken(data.token);
       setPage('dashboard');
-    } else { alert(data.error || 'Login failed'); }
+    } else alert(data.error || 'Login failed');
   }
 
   async function searchUsers() {
@@ -99,34 +96,22 @@ function App() {
     setResults(data);
   }
 
-  async function startLocalStream() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: { facingMode: "user" }
-      });
-
-      // Видео выключено по умолчанию
-      stream.getVideoTracks().forEach(track => track.enabled = false);
-
+  async function startLocalStream({ audio = true, video = false } = {}) {
+    if (!localStreamRef.current) {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio, video });
       const localVid = document.getElementById('localVideo');
       localVid.srcObject = stream;
-
       localStreamRef.current = stream;
-      setVideoOff(true);
-    } catch (err) {
-      console.error('Ошибка доступа к устройствам:', err);
-      alert('Не удалось получить доступ к микрофону или камере. Проверьте подключение устройств и разрешения браузера.');
     }
   }
 
-  function createPeerConnection() {
+  function createPeerConnection(targetSocketId) {
     const pc = new RTCPeerConnection();
 
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         socketRef.current.emit('ice-candidate', {
-          toSocketId: incoming ? incoming.fromSocketId : null,
+          toSocketId: targetSocketId,
           candidate: e.candidate
         });
       }
@@ -144,24 +129,31 @@ function App() {
     return pc;
   }
 
-  async function callUser(targetId) {
-    await startLocalStream();
-    const pc = createPeerConnection();
+  async function callUser(targetUserId) {
+    await startLocalStream({ audio: true, video: false });
+    const pc = createPeerConnection(null);
     pcRef.current = pc;
-    localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
+
+    localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
+
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    socketRef.current.emit('call-user', { toUserId: targetId, offer: pc.localDescription });
+
+    socketRef.current.emit('call-user', { toUserId: targetUserId, offer: pc.localDescription });
   }
 
   async function acceptCall() {
-    await startLocalStream();
-    const pc = createPeerConnection();
+    if (!incoming) return;
+    await startLocalStream({ audio: true, video: false });
+    const pc = createPeerConnection(incoming.fromSocketId);
     pcRef.current = pc;
-    localStreamRef.current.getTracks().forEach(t => pc.addTrack(t, localStreamRef.current));
+
+    localStreamRef.current.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current));
+
     await pc.setRemoteDescription(incoming.offer);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+
     socketRef.current.emit('accept-call', { toSocketId: incoming.fromSocketId, answer: pc.localDescription });
     setIncoming(null);
     setInCall(true);
@@ -195,12 +187,12 @@ function App() {
     }
   }
 
-  function toggleVideo() {
-    if (localStreamRef.current) {
-      const enabled = !videoOff;
-      localStreamRef.current.getVideoTracks().forEach(t => t.enabled = enabled);
-      setVideoOff(prev => !prev);
+  async function toggleVideo() {
+    if (!localStreamRef.current) {
+      await startLocalStream({ audio: true, video: true });
     }
+    localStreamRef.current.getVideoTracks().forEach(t => t.enabled = !t.enabled);
+    setVideoOff(prev => !prev);
   }
 
   function logout() {
@@ -211,75 +203,79 @@ function App() {
   }
 
   return (
-    <div className='app'>
-      <header className='topbar'>
+    <div className="app">
+      <header className="topbar">
         <h1>SkyCall</h1>
-        {token && <div><button onClick={logout} className='btn'>Logout</button></div>}
+        {token && <button className="btn" onClick={logout}>Logout</button>}
       </header>
 
       {page === 'auth' && (
-        <div className='auth'>
-          <div className='card'>
+        <div className="auth">
+          <div className="card">
             <h2>Register</h2>
             <form onSubmit={register}>
-              <input name='username' placeholder='username' required />
-              <input name='password' placeholder='password' type='password' required />
-              <button className='btn'>Register</button>
+              <input name="username" placeholder="username" required />
+              <input name="password" placeholder="password" type="password" required />
+              <button className="btn">Register</button>
             </form>
           </div>
-          <div className='card'>
+          <div className="card">
             <h2>Login</h2>
             <form onSubmit={login}>
-              <input name='username' placeholder='username' required />
-              <input name='password' placeholder='password' type='password' required />
-              <button className='btn'>Login</button>
+              <input name="username" placeholder="username" required />
+              <input name="password" placeholder="password" type="password" required />
+              <button className="btn">Login</button>
             </form>
           </div>
         </div>
       )}
 
       {page === 'dashboard' && (
-        <div className='dashboard'>
-          <div className='left'>
+        <div className="dashboard">
+          <div className="left">
             <h3>Search users</h3>
-            <div className='searchRow'>
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder='search by username' />
-              <button className='btn' onClick={searchUsers}>Search</button>
+            <div className="searchRow">
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="search by username" />
+              <button className="btn" onClick={searchUsers}>Search</button>
             </div>
-            <ul className='users'>
-              {results.map(r => <li key={r.id}>
-                <span>{r.username}</span>
-                <button className='btn small' onClick={() => callUser(r.id)}>Call</button>
-              </li>)}
+            <ul className="users">
+              {results.map(r => (
+                <li key={r.id}>
+                  <span>{r.username}</span>
+                  <button className="btn small" onClick={() => callUser(r.id)}>Call</button>
+                </li>
+              ))}
             </ul>
           </div>
-          <div className='right'>
-            <div className='videoGrid'>
-              <video id='localVideo' autoPlay muted playsInline className='local' />
-              <video id='remoteVideo' autoPlay playsInline className='remote' />
+          <div className="right">
+            <div className="videoGrid">
+              <video id="localVideo" autoPlay muted playsInline className="local" />
+              <video id="remoteVideo" autoPlay playsInline className="remote" />
             </div>
-            <div className='controls'>
-              <button className='btn' onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
-              <button className='btn' onClick={toggleVideo}>{videoOff ? 'Turn Video On' : 'Turn Video Off'}</button>
-              <button className='btn' onClick={endCallLocal}>End Call</button>
-            </div>
+            {inCall && (
+              <div className="controls">
+                <button className="btn" onClick={toggleMute}>{muted ? 'Unmute' : 'Mute'}</button>
+                <button className="btn" onClick={toggleVideo}>{videoOff ? 'Turn Video On' : 'Turn Video Off'}</button>
+                <button className="btn" onClick={endCallLocal}>End Call</button>
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {incoming && (
-        <div className='incoming'>
-          <div className='modal'>
+        <div className="incoming">
+          <div className="modal">
             <h3>Incoming call from {incoming.from.username}</h3>
-            <div className='modalControls'>
-              <button className='btn' onClick={acceptCall}>Accept</button>
-              <button className='btn' onClick={rejectCall}>Reject</button>
+            <div className="modalControls">
+              <button className="btn" onClick={acceptCall}>Accept</button>
+              <button className="btn" onClick={rejectCall}>Reject</button>
             </div>
           </div>
         </div>
       )}
 
-      <footer className='footer'>
+      <footer className="footer">
         <small>SkyCall — Demo WebRTC app</small>
       </footer>
     </div>
