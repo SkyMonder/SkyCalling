@@ -1,74 +1,106 @@
+// server.js
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
+import bodyParser from 'body-parser';
+import crypto from 'crypto';
 
 const app = express();
 app.use(cors());
-app.use(express.json());
-
-// Простейший API для теста
-app.get('/api/users', (req, res) => {
-  const q = req.query.q?.toLowerCase();
-  const users = [
-    { id: '1', username: 'Alice' },
-    { id: '2', username: 'Bob' },
-    { id: '3', username: 'Joker' }
-  ];
-  if (q) {
-    return res.json(users.filter(u => u.username.toLowerCase().includes(q)));
-  }
-  res.json(users);
-});
+app.use(bodyParser.json());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' } // можно ограничить доменом фронтенда
+  cors: {
+    origin: "*",
+    methods: ["GET","POST"]
+  }
 });
 
+// In-memory users storage (demo)
+const users = new Map(); // key: username, value: { password, id, socketId }
+
+function generateToken() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+// --- REST API ---
+app.post('/api/register', (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: "Missing fields" });
+  if (users.has(username)) return res.status(400).json({ error: "User exists" });
+
+  const id = crypto.randomUUID();
+  const token = generateToken();
+  users.set(username, { password, id, token, socketId: null });
+  res.json({ token, user: { id, username } });
+});
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body;
+  const user = users.get(username);
+  if (!user || user.password !== password) return res.status(400).json({ error: "Invalid credentials" });
+  const token = generateToken();
+  user.token = token;
+  res.json({ token, user: { id: user.id, username } });
+});
+
+app.get('/api/users', (req, res) => {
+  const q = req.query.q?.toLowerCase() || '';
+  const result = [];
+  for (const [username, u] of users.entries()) {
+    if (username.toLowerCase().includes(q)) result.push({ id: u.id, username });
+  }
+  res.json(result);
+});
+
+// --- Socket.io signaling ---
 io.on('connection', socket => {
-  console.log('new socket:', socket.id);
+  console.log("Socket connected:", socket.id);
 
   socket.on('auth', token => {
-    console.log('auth token', token);
-    // простой mock user
-    socket.user = { id: socket.id, username: `User-${socket.id.slice(0,4)}` };
-    socket.emit('auth-ok', { user: socket.user });
+    for (const [username, user] of users.entries()) {
+      if (user.token === token) {
+        user.socketId = socket.id;
+        socket.user = user;
+        socket.emit('auth-ok', { user: { id: user.id, username } });
+        break;
+      }
+    }
   });
 
   socket.on('call-user', ({ toUserId, offer }) => {
-    const target = Array.from(io.sockets.sockets.values())
-      .find(s => s.user?.id === toUserId);
-    if (target) {
-      target.emit('incoming-call', { from: socket.user, fromSocketId: socket.id, offer });
+    const target = [...users.values()].find(u => u.id === toUserId);
+    if (target?.socketId) {
+      io.to(target.socketId).emit('incoming-call', { from: socket.user, fromSocketId: socket.id, offer });
     }
   });
 
   socket.on('accept-call', ({ toSocketId, answer }) => {
-    const target = io.sockets.sockets.get(toSocketId);
-    if (target) target.emit('call-accepted', { answer });
+    io.to(toSocketId).emit('call-accepted', { answer });
   });
 
   socket.on('reject-call', ({ toSocketId }) => {
-    const target = io.sockets.sockets.get(toSocketId);
-    if (target) target.emit('call-rejected');
+    io.to(toSocketId).emit('call-rejected');
   });
 
   socket.on('ice-candidate', ({ toSocketId, candidate }) => {
-    const target = io.sockets.sockets.get(toSocketId);
-    if (target) target.emit('ice-candidate', { candidate });
+    io.to(toSocketId).emit('ice-candidate', { candidate });
   });
 
   socket.on('end-call', ({ toSocketId }) => {
-    const target = io.sockets.sockets.get(toSocketId);
-    if (target) target.emit('call-ended');
+    io.to(toSocketId).emit('call-ended');
   });
 
   socket.on('disconnect', () => {
-    console.log('disconnected', socket.id);
+    if (socket.user) socket.user.socketId = null;
+    console.log("Socket disconnected:", socket.id);
   });
 });
 
-// Render задаёт порт через env
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+// --- Start server ---
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
